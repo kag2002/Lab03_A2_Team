@@ -4,17 +4,27 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import { Message, Session } from '../types/chat';
 import { useLocalStorage } from '../hooks/useLocalStorage';
 
+export type LoadingStep =
+  | 'idle'
+  | 'validating'
+  | 'thinking'
+  | 'searching'
+  | 'analyzing'
+  | 'generating';
+
 interface ChatContextType {
   sessions: Session[];
   activeSessionId: string | null;
   activeSession: Session | null;
   isLoading: boolean;
+  loadingStep: LoadingStep;
   isSidebarOpen: boolean;
   createNewSession: () => string;
   deleteSession: (id: string) => void;
   setActiveSessionId: (id: string) => void;
   updateSessionMessages: (sessionId: string, messages: Message[]) => void;
   setIsLoading: (loading: boolean) => void;
+  setLoadingStep: (step: LoadingStep) => void;
   toggleSidebar: () => void;
 }
 
@@ -24,6 +34,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [sessions, setSessions] = useLocalStorage<Session[]>('chatbot_sessions', []);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [loadingStep, setLoadingStep] = useState<LoadingStep>('idle');
   const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(true);
 
   // Set the first session as active if none is selected
@@ -83,12 +94,14 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
         activeSessionId,
         activeSession,
         isLoading,
+        loadingStep,
         isSidebarOpen,
         createNewSession,
         deleteSession,
         setActiveSessionId,
         updateSessionMessages,
         setIsLoading,
+        setLoadingStep,
         toggleSidebar,
       }}
     >

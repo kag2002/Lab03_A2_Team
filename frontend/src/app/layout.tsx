@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Mimo Chatbot MVP | Cohort 2",
+  title: "EduTrace Chatbot MVP | Cohort 2",
   description: "Trải nghiệm trợ lý AI thông minh MiMo-v2.5-pro của Xiaomi.",
 };
 

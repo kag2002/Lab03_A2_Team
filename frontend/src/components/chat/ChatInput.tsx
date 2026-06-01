@@ -49,11 +49,10 @@ export const ChatInput: React.FC = () => {
           <button
             onClick={handleSend}
             disabled={!input.trim() || isLoading}
-            className={`p-2.5 rounded-xl flex items-center justify-center transition-all duration-300 transform active:scale-95 ${
-              input.trim() && !isLoading
+            className={`p-2.5 rounded-xl flex items-center justify-center transition-all duration-300 transform active:scale-95 ${input.trim() && !isLoading
                 ? 'bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-white shadow-md shadow-indigo-500/20'
                 : 'bg-[#181f30] text-slate-600 border border-slate-800/40 cursor-not-allowed'
-            }`}
+              }`}
             title="Gửi tin nhắn"
           >
             <SendHorizontal className="w-4 h-4" />
@@ -62,7 +61,7 @@ export const ChatInput: React.FC = () => {
       </div>
       <div className="max-w-3xl mx-auto text-center mt-2 select-none">
         <span className="text-[10px] text-slate-500/80 leading-normal">
-          MiMo AI có thể mắc sai sót. Vui lòng xác minh thông tin quan trọng.
+          EduTrace AI có thể mắc sai sót. Vui lòng xác minh thông tin quan trọng.
         </span>
       </div>
     </div>

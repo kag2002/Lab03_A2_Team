@@ -13,7 +13,7 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({ message }) => {
   // Quick custom formatter for simple Markdown elements (bold, lists, inline code, line breaks)
   const renderMessageContent = (content: string) => {
     if (!content) return null;
-    
+
     // Split into paragraphs / lines
     const lines = content.split('\n');
     return lines.map((line, idx) => {
@@ -71,9 +71,8 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({ message }) => {
   const latencySec = showTelemetry ? ((message.latency_ms || 0) / 1000).toFixed(2) : '0';
 
   return (
-    <div className={`flex w-full gap-4 py-4 px-4 transition-all duration-300 ${
-      isBot ? 'bg-[#0f1422]/30 border-y border-slate-900/50' : 'bg-transparent'
-    }`}>
+    <div className={`flex w-full gap-4 py-4 px-4 transition-all duration-300 ${isBot ? 'bg-[#0f1422]/30 border-y border-slate-900/50' : 'bg-transparent'
+      }`}>
       {/* Avatar Container */}
       <div className="flex-shrink-0">
         {isBot ? (
@@ -92,7 +91,7 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({ message }) => {
         {/* Name and Time */}
         <div className="flex items-center gap-2 select-none">
           <span className="text-xs font-semibold text-slate-300">
-            {isBot ? 'MiMo AI' : 'Bạn'}
+            {isBot ? 'EduTrace AI' : 'Bạn'}
           </span>
           <span className="text-[10px] text-slate-500">
             {formatTime(message.timestamp)}

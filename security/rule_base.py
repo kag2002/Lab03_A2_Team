@@ -120,7 +120,7 @@ class SecurityContext:
     role: str = "student"
 
     def can_access_student(self, requested_student_id: str) -> bool:
-        if self.role == "admin" and not self.allowed_student_ids:
+        if self.role in ("admin", "teacher") and not self.allowed_student_ids:
             return True
 
         allowed_ids = set(self.allowed_student_ids)

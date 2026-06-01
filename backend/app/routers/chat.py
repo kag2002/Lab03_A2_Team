@@ -118,7 +118,7 @@ AGENT_TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "Study_Plan_Generator",
-            "description": "Lập kế hoạch lộ trình học tập cá nhân hóa chi tiết dựa trên danh sách chủ đề yếu (weak_topics) và khoảng thời gian ôn luyện mong muốn.",
+            "description": "Lập kế hoạch lộ trình học tập CÁ NHÂN HÓA dựa trên điểm thực tế từng kỹ năng. QUAN TRỌNG: mỗi phần tử trong weak_topics PHẢI có định dạng 'TenKyNang:diem' để hệ thống tạo kế hoạch phù hợp mức độ, ví dụ: ['Listening:62', 'Reading:45', 'Speaking:70']. Không được truyền tên kỹ năng đơn thuần mà thiếu điểm số.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -127,7 +127,7 @@ AGENT_TOOLS_SCHEMA = [
                         "items": {
                             "type": "string"
                         },
-                        "description": "Các kỹ năng hoặc chủ đề học sinh cần tập trung ôn tập bổ trợ."
+                        "description": "Danh sách kỹ năng yếu theo định dạng 'TenKyNang:diem_thuc_te', ví dụ ['Listening:62', 'Reading:45']. Điểm lấy từ kết quả Grade_Search_Tool."
                     },
                     "duration": {
                         "type": "string",
@@ -165,16 +165,17 @@ async def chat_endpoint(request: ChatRequest):
     
     # 2. Input Moderation Guardrail
     for msg in request.messages:
-        is_safe, checked_text = await input_moderation.check_prompt(msg.content, context)
-        if not is_safe:
-            total_latency_ms = (time.time() - start_time) * 1000
-            return ChatResponse(
-                reply="[HỆ THỐNG BẢO MẬT] Tin nhắn của bạn đã bị từ chối do vi phạm quy tắc an toàn thông tin hoặc truy cập trái phép dữ liệu học sinh ngoài phạm vi được cấp quyền.",
-                model=llm_service.default_model,
-                usage=ChatResponseUsage(prompt_tokens=0, completion_tokens=0, total_tokens=0),
-                latency_ms=total_latency_ms
-            )
-        msg.content = checked_text  # Update with sanitized text if modified
+        if msg.role == "user":
+            is_safe, checked_text = await input_moderation.check_prompt(msg.content, context)
+            if not is_safe:
+                total_latency_ms = (time.time() - start_time) * 1000
+                return ChatResponse(
+                    reply="[HỆ THỐNG BẢO MẬT] Tin nhắn của bạn đã bị từ chối do vi phạm quy tắc an toàn thông tin hoặc truy cập trái phép dữ liệu học sinh ngoài phạm vi được cấp quyền.",
+                    model=llm_service.default_model,
+                    usage=ChatResponseUsage(prompt_tokens=0, completion_tokens=0, total_tokens=0),
+                    latency_ms=total_latency_ms
+                )
+            msg.content = checked_text  # Update with sanitized text if modified
 
     # Build initial message chain with system instructions
     system_prompt = (

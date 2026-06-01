@@ -71,12 +71,37 @@ class SecurityRuleBaseTests(unittest.TestCase):
             )
         )
 
-    def test_teacher_without_scope_cannot_access_every_student(self):
+    def test_teacher_has_full_access_by_default(self):
+        """
+        Business decision: teachers have default access to ALL students
+        when no explicit allowed_student_ids are set.
+        This differs from the original Khoi branch design (teacher = restricted).
+        Updated per project owner decision on 2026-06-01.
+        """
         teacher_context = SecurityContext(user_id="teacher-1", role="teacher")
         decision = validate_tool_call(
             "Grade_Search_Tool",
             {"student_id": "SV002", "course_name": "IELTS Mock Test"},
             teacher_context,
+        )
+
+        # Teacher without explicit scope SHOULD be allowed (full access)
+        self.assertTrue(decision.allowed)
+
+    def test_teacher_with_explicit_scope_is_restricted(self):
+        """
+        When a teacher context has explicit allowed_student_ids set,
+        the IDOR check is enforced and access to unlisted students is blocked.
+        """
+        restricted_teacher = SecurityContext(
+            user_id="teacher-2",
+            role="teacher",
+            allowed_student_ids=frozenset({"SV001"}),  # Only SV001
+        )
+        decision = validate_tool_call(
+            "Grade_Search_Tool",
+            {"student_id": "SV999", "course_name": "TOEIC"},
+            restricted_teacher,
         )
 
         self.assertFalse(decision.allowed)
