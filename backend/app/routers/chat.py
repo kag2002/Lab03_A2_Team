@@ -2,6 +2,7 @@ import time
 import json
 import logging
 import sys
+import uuid
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from app.schemas.chat import ChatRequest, ChatResponse, ChatResponseUsage
@@ -10,6 +11,7 @@ from app.guardrails.output_moderation import output_moderation
 from app.services.llm_service import llm_service
 from app.services.token_service import count_messages_tokens, count_string_tokens
 from app.monitoring.metrics import metrics_collector
+from app.monitoring.trace_logger import json_trace_logger, safe_preview, utc_now_iso
 from app.services.agent_tools import agent_tools
 
 # Add project root directory to system path to import security module
@@ -154,6 +156,24 @@ AGENT_TOOLS_SCHEMA = [
 @router.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
     start_time = time.time()
+    request_id = str(uuid.uuid4())
+    trace = {
+        "request_id": request_id,
+        "started_at": utc_now_iso(),
+        "endpoint": "/api/chat",
+        "model": llm_service.default_model,
+        "context": {},
+        "stages": []
+    }
+
+    def add_stage(stage: str, status: str = "ok", **data):
+        trace["stages"].append({
+            "timestamp": utc_now_iso(),
+            "elapsed_ms": round((time.time() - start_time) * 1000, 2),
+            "stage": stage,
+            "status": status,
+            **safe_preview(data)
+        })
     
     # 1. Initialize Security Context based on request meta
     context = SecurityContext(
@@ -162,6 +182,19 @@ async def chat_endpoint(request: ChatRequest):
         allowed_student_ids=frozenset(request.allowed_student_ids or []),
         role=request.role or "student"
     )
+    trace["context"] = {
+        "user_id": context.user_id,
+        "role": context.role,
+        "student_id": context.student_id,
+        "allowed_student_ids": sorted(context.allowed_student_ids)
+    }
+    add_stage(
+        "request_received",
+        message_count=len(request.messages),
+        roles=[msg.role for msg in request.messages],
+        temperature=request.temperature,
+        max_tokens=request.max_tokens
+    )
     
     # 2. Input Moderation Guardrail
     for msg in request.messages:
@@ -169,12 +202,36 @@ async def chat_endpoint(request: ChatRequest):
             is_safe, checked_text = await input_moderation.check_prompt(msg.content, context)
             if not is_safe:
                 total_latency_ms = (time.time() - start_time) * 1000
-                return ChatResponse(
+                add_stage(
+                    "input_moderation",
+                    "blocked",
+                    role=msg.role,
+                    content_preview=msg.content,
+                    sanitized_preview=checked_text
+                )
+                response = ChatResponse(
                     reply="[HỆ THỐNG BẢO MẬT] Tin nhắn của bạn đã bị từ chối do vi phạm quy tắc an toàn thông tin hoặc truy cập trái phép dữ liệu học sinh ngoài phạm vi được cấp quyền.",
                     model=llm_service.default_model,
                     usage=ChatResponseUsage(prompt_tokens=0, completion_tokens=0, total_tokens=0),
                     latency_ms=total_latency_ms
                 )
+                trace["finished_at"] = utc_now_iso()
+                trace["status"] = "blocked"
+                trace["latency_ms"] = total_latency_ms
+                trace["response"] = {
+                    "reply_preview": response.reply,
+                    "usage": response.usage.model_dump(),
+                    "latency_ms": response.latency_ms
+                }
+                json_trace_logger.write_trace(trace)
+                return response
+            add_stage(
+                "input_moderation",
+                "passed",
+                role=msg.role,
+                content_preview=msg.content,
+                sanitized_preview=checked_text
+            )
             msg.content = checked_text  # Update with sanitized text if modified
 
     # Build initial message chain with system instructions
@@ -191,6 +248,11 @@ async def chat_endpoint(request: ChatRequest):
     payload_messages = [{"role": "system", "content": system_prompt}]
     for msg in request.messages:
         payload_messages.append({"role": msg.role, "content": msg.content})
+    add_stage(
+        "system_prompt_built",
+        payload_message_count=len(payload_messages),
+        system_prompt_preview=system_prompt
+    )
 
     # 3. Agent Tool Loop execution (Max 5 turns)
     loop_count = 0
@@ -201,6 +263,11 @@ async def chat_endpoint(request: ChatRequest):
     while loop_count < 5:
         loop_count += 1
         logger.info(f"Agent Loop turn {loop_count}/5 initiated...")
+        add_stage(
+            "agent_loop_started",
+            loop=loop_count,
+            payload_message_count=len(payload_messages)
+        )
         
         try:
             llm_res = await llm_service.chat_completion(
@@ -213,6 +280,16 @@ async def chat_endpoint(request: ChatRequest):
             import traceback
             tb_str = traceback.format_exc()
             logger.error(f"Unexpected error in LLM call: {e}\n{tb_str}")
+            add_stage(
+                "llm_call",
+                "error",
+                loop=loop_count,
+                error=str(e)
+            )
+            trace["finished_at"] = utc_now_iso()
+            trace["status"] = "error"
+            trace["latency_ms"] = (time.time() - start_time) * 1000
+            json_trace_logger.write_trace(trace)
             raise HTTPException(status_code=500, detail=f"LLM Service Error: {str(e)}\n{tb_str}")
 
         usage_data = llm_res.get("usage") or {}
@@ -221,6 +298,18 @@ async def chat_endpoint(request: ChatRequest):
 
         reply = llm_res.get("reply")
         tool_calls = llm_res.get("tool_calls")
+        add_stage(
+            "llm_call",
+            "completed",
+            loop=loop_count,
+            reply_preview=reply,
+            tool_call_count=len(tool_calls or []),
+            tool_names=[
+                call.get("function", {}).get("name")
+                for call in (tool_calls or [])
+            ],
+            usage=usage_data
+        )
 
         # Record assistant turn in payload
         assistant_turn = {"role": "assistant"}
@@ -235,6 +324,11 @@ async def chat_endpoint(request: ChatRequest):
 
         if not tool_calls:
             logger.info("No tool calls requested by model. Agent loop finalized.")
+            add_stage(
+                "agent_loop_finished",
+                reason="no_tool_calls",
+                loop=loop_count
+            )
             break
 
         # Process each requested tool call
@@ -247,13 +341,35 @@ async def chat_endpoint(request: ChatRequest):
                 args = json.loads(tool_call["function"]["arguments"])
             except Exception:
                 args = {}
+                add_stage(
+                    "tool_arguments_parse",
+                    "error",
+                    loop=loop_count,
+                    tool_name=tool_name,
+                    call_id=call_id,
+                    raw_arguments=tool_call["function"].get("arguments")
+                )
 
             if tool_name == "Stop":
                 stop_called = True
 
             # Safely execute the tool
             logger.info(f"Executing tool '{tool_name}' for call '{call_id}'...")
+            add_stage(
+                "tool_call_started",
+                loop=loop_count,
+                tool_name=tool_name,
+                call_id=call_id,
+                args=args
+            )
             tool_result = await agent_tools.execute_tool(tool_name, args, context)
+            add_stage(
+                "tool_call_finished",
+                loop=loop_count,
+                tool_name=tool_name,
+                call_id=call_id,
+                result=tool_result
+            )
 
             # Record tool output in history
             payload_messages.append({
@@ -265,11 +381,20 @@ async def chat_endpoint(request: ChatRequest):
 
         if stop_called:
             logger.info("Stop tool invoked by agent. Breaking tool loop.")
+            add_stage(
+                "agent_loop_finished",
+                reason="stop_tool_called",
+                loop=loop_count
+            )
             break
 
     # If the last turn was a tool output and we haven't summarized, run one final turn to construct response
     if not final_reply or (payload_messages and payload_messages[-1]["role"] == "tool"):
         logger.info("Running final synthesis call to summarize tool results...")
+        add_stage(
+            "final_synthesis_started",
+            payload_message_count=len(payload_messages)
+        )
         try:
             llm_res = await llm_service.chat_completion(
                 messages=payload_messages,
@@ -281,12 +406,29 @@ async def chat_endpoint(request: ChatRequest):
             total_prompt_tokens += usage_data.get("prompt_tokens", 0)
             total_completion_tokens += usage_data.get("completion_tokens", 0)
             final_reply = llm_res.get("reply") or ""
+            add_stage(
+                "final_synthesis_finished",
+                reply_preview=final_reply,
+                usage=usage_data
+            )
         except Exception as e:
             logger.error(f"Synthesis completion failed: {e}")
             final_reply = "Xin lỗi, đã xảy ra lỗi trong quá trình tổng hợp kết quả phân tích điểm."
+            add_stage(
+                "final_synthesis_finished",
+                "error",
+                error=str(e),
+                fallback_reply=final_reply
+            )
 
     # 4. Output Moderation Guardrail (Sanitize secrets / API keys)
     is_safe_output, sanitized_reply = await output_moderation.check_response(final_reply)
+    add_stage(
+        "output_moderation",
+        "passed" if is_safe_output else "blocked",
+        reply_preview=final_reply,
+        sanitized_preview=sanitized_reply
+    )
 
     # Calculate final latency
     total_latency_ms = (time.time() - start_time) * 1000
@@ -305,6 +447,13 @@ async def chat_endpoint(request: ChatRequest):
         prompt_tokens=total_prompt_tokens,
         completion_tokens=total_completion_tokens
     )
+    add_stage(
+        "metrics_recorded",
+        latency_ms=total_latency_ms,
+        prompt_tokens=total_prompt_tokens,
+        completion_tokens=total_completion_tokens,
+        total_tokens=total_tokens
+    )
     
     response_usage = ChatResponseUsage(
         prompt_tokens=total_prompt_tokens,
@@ -312,9 +461,19 @@ async def chat_endpoint(request: ChatRequest):
         total_tokens=total_tokens
     )
     
-    return ChatResponse(
+    response = ChatResponse(
         reply=sanitized_reply,
         model=llm_service.default_model,
         usage=response_usage,
         latency_ms=total_latency_ms
     )
+    trace["finished_at"] = utc_now_iso()
+    trace["status"] = "completed"
+    trace["latency_ms"] = total_latency_ms
+    trace["response"] = {
+        "reply_preview": sanitized_reply,
+        "usage": response_usage.model_dump(),
+        "latency_ms": total_latency_ms
+    }
+    json_trace_logger.write_trace(trace)
+    return response
