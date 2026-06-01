@@ -14,6 +14,8 @@ bash scripts/_pyrun.sh scripts/submit_log.py || true
 exit 0
 '@
 
+# Normalize to LF so the shebang works under Git Bash on Windows.
+$HookBody = $HookBody -replace "`r`n", "`n"
 Set-Content -Path $HookFile -Value $HookBody -Encoding UTF8 -NoNewline
 Write-Host "[ai-log] Git pre-push hook installed."
 
