@@ -1,5 +1,8 @@
 import time
+import json
 import logging
+import sys
+from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from app.schemas.chat import ChatRequest, ChatResponse, ChatResponseUsage
 from app.guardrails.input_moderation import input_moderation
@@ -7,6 +10,14 @@ from app.guardrails.output_moderation import output_moderation
 from app.services.llm_service import llm_service
 from app.services.token_service import count_messages_tokens, count_string_tokens
 from app.monitoring.metrics import metrics_collector
+from app.services.agent_tools import agent_tools
+
+# Add project root directory to system path to import security module
+root_dir = Path(__file__).resolve().parent.parent.parent.parent
+if str(root_dir) not in sys.path:
+    sys.path.append(str(root_dir))
+
+from security.rule_base import SecurityContext
 
 logger = logging.getLogger("app.routers.chat")
 router = APIRouter(prefix="/api")
@@ -40,89 +51,269 @@ Bạn là một trợ lý AI hoạt động trong hệ thống Chatbot Stream th
 * Nếu người dùng yêu cầu viết mã HTML/JS, hãy đặt toàn bộ chúng vào trong Code Block chuyên biệt. Tuyệt đối không viết trực tiếp mã HTML ra ngoài văn bản thô để tránh lỗi bảo mật XSS.
 """
 
+# Define agent tools schemas in standard OpenAI format
+AGENT_TOOLS_SCHEMA = [
+    {
+        "type": "function",
+        "function": {
+            "name": "Grade_Search_Tool",
+            "description": "Tra cứu bảng điểm TOEIC đầy đủ của học sinh theo mã student_id (dạng SVXXX) và tên kỳ thi (ví dụ: 'TOEIC'). Bạn PHẢI chạy công cụ này trước tiên để có thông tin điểm thực tế của học sinh.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "student_id": {
+                        "type": "string",
+                        "description": "Mã định danh học sinh, ví dụ 'SV001', 'SV002'..."
+                    },
+                    "course_name": {
+                        "type": "string",
+                        "description": "Tên kỳ thi/học phần, truyền vào 'TOEIC'"
+                    }
+                },
+                "required": ["student_id", "course_name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "Score_Analyzer",
+            "description": "Phân tích điểm số chi tiết các kỹ năng (Listening, Reading, Speaking, Writing) trên thang điểm 0-100 để đánh giá điểm mạnh, điểm yếu chính xác.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "scores": {
+                        "type": "object",
+                        "description": "Mẫu dữ liệu: {'Listening': 90, 'Reading': 85, 'Speaking': 70, 'Writing': 90}",
+                        "additionalProperties": {
+                            "type": "number"
+                        }
+                    }
+                },
+                "required": ["scores"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "Learning_Gap_Detector",
+            "description": "Nhận diện lỗ hổng kiến thức học tập dựa trên danh sách các phần thi nhỏ có điểm số hoặc tỷ lệ làm đúng thấp (ví dụ: P3, P7, Ngữ pháp).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "low_score_parts": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "Danh sách các phần hoặc kỹ năng có điểm thấp."
+                    }
+                },
+                "required": ["low_score_parts"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "Study_Plan_Generator",
+            "description": "Lập kế hoạch lộ trình học tập cá nhân hóa chi tiết dựa trên danh sách chủ đề yếu (weak_topics) và khoảng thời gian ôn luyện mong muốn.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "weak_topics": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "Các kỹ năng hoặc chủ đề học sinh cần tập trung ôn tập bổ trợ."
+                    },
+                    "duration": {
+                        "type": "string",
+                        "description": "Thời lượng học, ví dụ '2 tuần', '4 weeks', '30 ngày'..."
+                    }
+                },
+                "required": ["weak_topics", "duration"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "Stop",
+            "description": "Dừng vòng lặp gọi công cụ sau khi đã giải quyết xong yêu cầu tra cứu và phân tích điểm cho người dùng.",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    }
+]
+
 @router.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
     start_time = time.time()
     
-    # 1. Input Moderation Guardrail
-    for msg in request.messages:
-        is_safe, checked_text = await input_moderation.check_prompt(msg.content)
-        if not is_safe:
-            raise HTTPException(status_code=400, detail="User message failed input safety moderation.")
-        msg.content = checked_text  # Update with sanitized text if modified
-        
-    # Inject Output Formatting Guardrails to system prompt
-    payload_messages = []
-    system_msg_index = -1
-    for idx, msg in enumerate(request.messages):
-        if msg.role == "system":
-            system_msg_index = idx
-            break
-            
-    if system_msg_index != -1:
-        # Append to existing system prompt
-        original_system_msg = request.messages[system_msg_index]
-        updated_content = f"{original_system_msg.content}\n\n{FORMATTING_GUARDRAILS}"
-        for idx, msg in enumerate(request.messages):
-            if idx == system_msg_index:
-                payload_messages.append({"role": "system", "content": updated_content})
-            else:
-                payload_messages.append({"role": msg.role, "content": msg.content})
-    else:
-        # Prepend new system prompt
-        payload_messages.append({"role": "system", "content": FORMATTING_GUARDRAILS.strip()})
-        for msg in request.messages:
-            payload_messages.append({"role": msg.role, "content": msg.content})
-
-    # 2. LLM Call via LLM Service
-    try:
-        llm_res = await llm_service.chat_completion(
-            messages=payload_messages,
-            temperature=request.temperature,
-            max_tokens=request.max_tokens
-        )
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        logger.error(f"Unexpected error in LLM call: {e}")
-        raise HTTPException(status_code=500, detail=f"LLM Service Error: {str(e)}")
-
-        
-    reply = llm_res["reply"]
-    model_used = llm_res["model"]
-    usage_data = llm_res["usage"]
+    # 1. Initialize Security Context based on request meta
+    context = SecurityContext(
+        user_id=request.user_id,
+        student_id=request.student_id,
+        allowed_student_ids=frozenset(request.allowed_student_ids or []),
+        role=request.role or "student"
+    )
     
-    # 3. Output Moderation Guardrail
-    is_safe_output, sanitized_reply = await output_moderation.check_response(reply)
-    if not is_safe_output:
-        logger.warning("LLM response failed output safety moderation.")
-        sanitized_reply = "[Content removed due to output safety moderation policy.]"
+    # 2. Input Moderation Guardrail
+    for msg in request.messages:
+        is_safe, checked_text = await input_moderation.check_prompt(msg.content, context)
+        if not is_safe:
+            total_latency_ms = (time.time() - start_time) * 1000
+            return ChatResponse(
+                reply="[HỆ THỐNG BẢO MẬT] Tin nhắn của bạn đã bị từ chối do vi phạm quy tắc an toàn thông tin hoặc truy cập trái phép dữ liệu học sinh ngoài phạm vi được cấp quyền.",
+                model=llm_service.default_model,
+                usage=ChatResponseUsage(prompt_tokens=0, completion_tokens=0, total_tokens=0),
+                latency_ms=total_latency_ms
+            )
+        msg.content = checked_text  # Update with sanitized text if modified
 
-    # Compute latency
+    # Build initial message chain with system instructions
+    system_prompt = (
+        f"{FORMATTING_GUARDRAILS.strip()}\n\n"
+        "Bạn là Trợ lý Học tập AI đắc lực. Bạn hỗ trợ tra cứu điểm số TOEIC 4 kỹ năng của học sinh "
+        "và xây dựng lộ trình ôn tập cá nhân hóa.\n"
+        "QUY TẮC BẢO MẬT:\n"
+        "1. Chỉ truy cập và hiển thị thông tin khi học sinh được phép truy cập theo đúng phạm vi phân quyền.\n"
+        "2. Luôn sử dụng các công cụ an toàn hệ thống (Grade_Search_Tool, Score_Analyzer, v.v.) để tra cứu thay vì tự suy đoán.\n"
+        "3. Trả lời bằng tiếng Việt lịch sự, thân thiện và tuân thủ các quy tắc định dạng đầu ra (Markdown, Spacing)."
+    )
+    
+    payload_messages = [{"role": "system", "content": system_prompt}]
+    for msg in request.messages:
+        payload_messages.append({"role": msg.role, "content": msg.content})
+
+    # 3. Agent Tool Loop execution (Max 5 turns)
+    loop_count = 0
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
+    final_reply = ""
+    
+    while loop_count < 5:
+        loop_count += 1
+        logger.info(f"Agent Loop turn {loop_count}/5 initiated...")
+        
+        try:
+            llm_res = await llm_service.chat_completion(
+                messages=payload_messages,
+                temperature=request.temperature,
+                max_tokens=request.max_tokens,
+                tools=AGENT_TOOLS_SCHEMA
+            )
+        except Exception as e:
+            import traceback
+            tb_str = traceback.format_exc()
+            logger.error(f"Unexpected error in LLM call: {e}\n{tb_str}")
+            raise HTTPException(status_code=500, detail=f"LLM Service Error: {str(e)}\n{tb_str}")
+
+        usage_data = llm_res.get("usage") or {}
+        total_prompt_tokens += usage_data.get("prompt_tokens", 0)
+        total_completion_tokens += usage_data.get("completion_tokens", 0)
+
+        reply = llm_res.get("reply")
+        tool_calls = llm_res.get("tool_calls")
+
+        # Record assistant turn in payload
+        assistant_turn = {"role": "assistant"}
+        if reply is not None:
+            assistant_turn["content"] = reply
+        if tool_calls is not None:
+            assistant_turn["tool_calls"] = tool_calls
+        payload_messages.append(assistant_turn)
+
+        if reply:
+            final_reply = reply
+
+        if not tool_calls:
+            logger.info("No tool calls requested by model. Agent loop finalized.")
+            break
+
+        # Process each requested tool call
+        stop_called = False
+        for tool_call in tool_calls:
+            tool_name = tool_call["function"]["name"]
+            call_id = tool_call["id"]
+            
+            try:
+                args = json.loads(tool_call["function"]["arguments"])
+            except Exception:
+                args = {}
+
+            if tool_name == "Stop":
+                stop_called = True
+
+            # Safely execute the tool
+            logger.info(f"Executing tool '{tool_name}' for call '{call_id}'...")
+            tool_result = await agent_tools.execute_tool(tool_name, args, context)
+
+            # Record tool output in history
+            payload_messages.append({
+                "role": "tool",
+                "name": tool_name,
+                "tool_call_id": call_id,
+                "content": json.dumps(tool_result, ensure_ascii=False)
+            })
+
+        if stop_called:
+            logger.info("Stop tool invoked by agent. Breaking tool loop.")
+            break
+
+    # If the last turn was a tool output and we haven't summarized, run one final turn to construct response
+    if not final_reply or (payload_messages and payload_messages[-1]["role"] == "tool"):
+        logger.info("Running final synthesis call to summarize tool results...")
+        try:
+            llm_res = await llm_service.chat_completion(
+                messages=payload_messages,
+                temperature=request.temperature,
+                max_tokens=request.max_tokens,
+                tools=None
+            )
+            usage_data = llm_res.get("usage") or {}
+            total_prompt_tokens += usage_data.get("prompt_tokens", 0)
+            total_completion_tokens += usage_data.get("completion_tokens", 0)
+            final_reply = llm_res.get("reply") or ""
+        except Exception as e:
+            logger.error(f"Synthesis completion failed: {e}")
+            final_reply = "Xin lỗi, đã xảy ra lỗi trong quá trình tổng hợp kết quả phân tích điểm."
+
+    # 4. Output Moderation Guardrail (Sanitize secrets / API keys)
+    is_safe_output, sanitized_reply = await output_moderation.check_response(final_reply)
+
+    # Calculate final latency
     total_latency_ms = (time.time() - start_time) * 1000
 
-    # Ensure token counts are filled (fallbacks if API does not return usage)
-    prompt_tokens = usage_data.get("prompt_tokens") or count_messages_tokens(request.messages)
-    completion_tokens = usage_data.get("completion_tokens") or count_string_tokens(sanitized_reply)
-    total_tokens = usage_data.get("total_tokens") or (prompt_tokens + completion_tokens)
+    # Fallback default tokens if they evaluate to zero
+    if total_prompt_tokens == 0:
+        total_prompt_tokens = count_messages_tokens(request.messages)
+    if total_completion_tokens == 0:
+        total_completion_tokens = count_string_tokens(sanitized_reply)
+    total_tokens = total_prompt_tokens + total_completion_tokens
     
-    # 4. Record Metrics
+    # 5. Record final session metrics
     metrics_collector.record_request_metrics(
         path="/api/chat",
         latency_ms=total_latency_ms,
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens
+        prompt_tokens=total_prompt_tokens,
+        completion_tokens=total_completion_tokens
     )
     
     response_usage = ChatResponseUsage(
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
+        prompt_tokens=total_prompt_tokens,
+        completion_tokens=total_completion_tokens,
         total_tokens=total_tokens
     )
     
     return ChatResponse(
         reply=sanitized_reply,
-        model=model_used,
+        model=llm_service.default_model,
         usage=response_usage,
         latency_ms=total_latency_ms
     )

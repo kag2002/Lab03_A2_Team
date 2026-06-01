@@ -9,6 +9,12 @@ class ChatRequest(BaseModel):
     messages: List[ChatMessage] = Field(..., description="The conversation history")
     temperature: Optional[float] = Field(0.7, ge=0.0, le=2.0, description="Sampling temperature")
     max_tokens: Optional[int] = Field(None, gt=0, description="Maximum number of tokens to generate")
+    
+    # Optional Security Context fields for multi-role grade lookup and IDOR prevention testing
+    user_id: Optional[str] = Field("user-1", description="Identifier of the user")
+    student_id: Optional[str] = Field("SV001", description="Student ID bound to the user context")
+    allowed_student_ids: Optional[List[str]] = Field(["SV001"], description="List of student IDs this user is authorized to query")
+    role: Optional[str] = Field("student", description="Role of the user (student, teacher, admin)")
 
 class ChatResponseUsage(BaseModel):
     prompt_tokens: int = Field(0, description="Number of tokens in the prompt")
