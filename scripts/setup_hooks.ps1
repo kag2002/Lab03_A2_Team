@@ -14,7 +14,10 @@ bash scripts/_pyrun.sh scripts/submit_log.py || true
 exit 0
 '@
 
-Set-Content -Path $HookFile -Value $HookBody -Encoding UTF8 -NoNewline
+# In PowerShell, Set-Content with UTF8 writes a Byte Order Mark (BOM) which breaks Git Bash hook execution.
+# We use the .NET File class to write a clean BOM-free UTF-8 file with LF line endings.
+$CleanBody = $HookBody.Replace("`r`n", "`n")
+[System.IO.File]::WriteAllText("$pwd/$HookFile", $CleanBody)
 Write-Host "[ai-log] Git pre-push hook installed."
 
 if (-not (Test-Path .ai-log)) { New-Item -ItemType Directory -Path .ai-log | Out-Null }
