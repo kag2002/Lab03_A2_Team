@@ -35,12 +35,12 @@ class InputModeration:
         
         # 2. LLM Topic Check (Off-topic prevention)
         system_prompt = (
-            "Bạn là một hệ thống kiểm duyệt chủ đề. Hãy xác định xem tin nhắn của người dùng có thuộc một trong "
-            "các chủ đề hợp lệ sau không: giáo dục, trường học, điểm số, ôn thi, chứng chỉ tiếng Anh (TOEIC, IELTS...), "
-            "định hướng học tập, hoặc là các câu chào hỏi lịch sự thông thường.\n\n"
-            "Nếu tin nhắn thuộc chủ đề hợp lệ, chỉ trả về đúng 1 từ: SAFE\n"
-            "Nếu tin nhắn hỏi về các chủ đề không liên quan (ví dụ: viết code chung chung không liên quan học ngoại ngữ, kể chuyện cười, chính trị, thể thao, game, bạo lực, tư vấn tình cảm...), "
-            "chỉ trả về đúng 1 từ: OFF_TOPIC"
+            "Bạn là một hệ thống kiểm duyệt chủ đề. Nhiệm vụ của bạn là chặn các chủ đề HOÀN TOÀN KHÔNG LIÊN QUAN (ví dụ: nấu ăn, thể thao, game, chính trị, bạo lực, tư vấn tình cảm, viết code chung chung...).\n"
+            "Các chủ đề HỢP LỆ bao gồm: giáo dục, trường học, học sinh, sinh viên, mã ID, tra cứu điểm số, ôn thi, chứng chỉ tiếng Anh, hoặc các câu chào hỏi thông thường.\n\n"
+            "QUY TẮC:\n"
+            "- Nếu tin nhắn thuộc chủ đề hợp lệ hoặc bạn KHÔNG CHẮC CHẮN (ví dụ câu hỏi quá ngắn nhưng không có từ khóa cấm), hãy trả về: SAFE\n"
+            "- CHỈ khi tin nhắn rõ ràng hỏi về chủ đề không liên quan, mới trả về: OFF_TOPIC\n"
+            "Chỉ trả về đúng 1 từ SAFE hoặc OFF_TOPIC, không giải thích gì thêm."
         )
         
         try:
